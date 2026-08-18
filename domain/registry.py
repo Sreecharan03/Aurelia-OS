@@ -1,13 +1,11 @@
-# AURELIA - Week 1, Step 3: Connecting Mission to Dataset via a Registry
-# Save as: D:\AURELIA\domain\registry.py
-#
-# This file assumes mission.py and dataset.py are saved in the same
-# domain/ folder, since it imports from them.
+# AURELIA - Week 1, Step 8: Wiring events into the real flow
+# This REPLACES your existing domain/registry.py
 
 from __future__ import annotations
 
 from domain.dataset import Dataset
 from domain.mission import Mission, ResourceBudget
+from domain.event import Event, EventStore, EventType
 
 
 class DatasetNotFoundError(Exception):
@@ -16,13 +14,6 @@ class DatasetNotFoundError(Exception):
 
 
 class DatasetRegistry:
-    """
-    The single source of truth for 'which Datasets exist'.
-    Right now this is just an in-memory dict - later this becomes a real
-    database table. The INTERFACE (register / get / exists) stays the same
-    even when the storage underneath changes - that's the point of a registry.
-    """
-
     def __init__(self):
         self._datasets: dict[str, Dataset] = {}
 
@@ -40,35 +31,51 @@ class DatasetRegistry:
 
 def create_mission(
     registry: DatasetRegistry,
+    event_store: EventStore,
     objective: str,
     dataset_id: str,
     budget: ResourceBudget,
     constraints: list[str],
 ) -> Mission:
     """
-    The RULE lives here, not inside the Mission model itself:
-    a Mission can only be created if its dataset_id points to a
-    Dataset that has actually been registered.
+    Same validation rule as before - PLUS it now automatically appends
+    a MISSION_CREATED event to the event_store. The caller never has to
+    remember to log this manually - it's baked into the function that
+    actually creates the Mission. This is the pattern we'll repeat for
+    every state-changing operation in the system.
     """
     if not registry.exists(dataset_id):
         raise DatasetNotFoundError(
             f"Cannot create Mission: dataset_id={dataset_id} is not registered"
         )
 
-    return Mission(
+    mission = Mission(
         objective=objective,
         dataset_ref=dataset_id,
         budget=budget,
         constraints=constraints,
     )
 
+    # The event is emitted HERE, as part of creation - not as a separate
+    # manual step the caller could forget to do.
+    event_store.append(Event(
+        event_type=EventType.MISSION_CREATED,
+        mission_id=mission.id,
+        payload={
+            "objective": mission.objective,
+            "dataset_ref": mission.dataset_ref,
+        },
+    ))
+
+    return mission
+
 
 if __name__ == "__main__":
     from domain.dataset import DatasetFormat
 
     registry = DatasetRegistry()
+    event_store = EventStore()
 
-    # Register a real dataset first
     d = Dataset(
         name="large_dataset",
         format=DatasetFormat.PARQUET,
@@ -77,27 +84,19 @@ if __name__ == "__main__":
     registry.register(d)
     print(f"Registered dataset: {d.id}\n")
 
-    # This should SUCCEED - dataset_id is real
     m = create_mission(
         registry=registry,
+        event_store=event_store,
         objective="Improve minority-class F1",
         dataset_id=d.id,
         budget=ResourceBudget(max_minutes=240, max_gpu_hours=4.0),
         constraints=["No external data", "No leakage", "Fully reproducible"],
     )
-    print("Mission created successfully:")
-    print(m.model_dump_json(indent=2))
-    print()
+    print(f"Mission created: {m.id}\n")
 
-    # This should FAIL - dataset_id does not exist
-    print("Now trying to create a Mission with a FAKE dataset_id...")
-    try:
-        create_mission(
-            registry=registry,
-            objective="This should fail",
-            dataset_id="DATASET-doesnotexist",
-            budget=ResourceBudget(max_minutes=60, max_gpu_hours=1.0),
-            constraints=[],
-        )
-    except DatasetNotFoundError as e:
-        print(f"Correctly rejected: {e}")
+    # THE PROOF: check the event store WITHOUT ever looking at the
+    # mission object itself - the event should exist automatically.
+    events = event_store.get_events(mission_id=m.id)
+    print(f"Events automatically recorded for this mission: {len(events)}")
+    for e in events:
+        print(f"  {e.event_type} -> {e.payload}")
