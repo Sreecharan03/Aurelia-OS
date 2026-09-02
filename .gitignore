@@ -1,0 +1,6 @@
+kaggle.json
+kaggle_api_json.json
+data_raw/
+*.zip
+__pycache__/
+*.pyc
